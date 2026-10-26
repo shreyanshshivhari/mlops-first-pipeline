@@ -22,7 +22,7 @@ permissions:
 
 # Define the jobs that make up the pipeline.
 jobs:
-  test and build:
+  test-and-build:
     # Github provides a fresh ubuntu virtual machine to run the job.
     runs-on: ubuntu-latest
 
