@@ -1,13 +1,16 @@
+
 import os
 import mlflow
 import mlflow.sklearn
-from fastapi import FastAPI,HTTPException,Request
+
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
-from mlflow import MlflowClient
 from contextlib import asynccontextmanager
 from typing import Callable
 
-# app = FastAPI(title="Iris Model API")
+# ---------------------------------
+# MLFLOW CONFIGURATION
+# ---------------------------------
 
 MLFLOW_TRACKING_URI = os.environ.get(
     "MLFLOW_TRACKING_URI",
@@ -18,11 +21,18 @@ mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
 MODEL_URL = "models:/iris-classifier@champion"
 
+
+# ---------------------------------
+# MODEL LOADER
+# ---------------------------------
+
 def load_mlflow_model():
-    mlflow.set_tracking_url(MLFLOW_TRACKING_URI)
-    return mlflow.sklean.load_model(MODEL_URL)
+    return mlflow.sklearn.load_model(MODEL_URL)
 
 
+# ---------------------------------
+# REQUEST SCHEMA
+# ---------------------------------
 
 class IrisRequest(BaseModel):
     sepal_length: float = Field(gt=0)
@@ -30,57 +40,116 @@ class IrisRequest(BaseModel):
     petal_length: float = Field(gt=0)
     petal_width: float = Field(gt=0)
 
-def create_app(model_loader:Callable=load_mlflow_model,
-               version_loader:Callable=None):
+
+# ---------------------------------
+# APPLICATION FACTORY
+# ---------------------------------
+
+def create_app(
+    model_loader: Callable = load_mlflow_model,
+    version_loader: Callable = None
+):
+
     if version_loader is None:
         def version_loader():
-            client = mlflow.MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
-            return client.get_model_version_by_alias(name="iris-classifier", alias="champion")
-        return champion.version
-    #lifepsan function excecutes when application starts......
+            client = mlflow.MlflowClient(
+                tracking_uri=MLFLOW_TRACKING_URI
+            )
+
+            champion = client.get_model_version_by_alias(
+                name="iris-classifier",
+                alias="champion"
+            )
+
+            return champion.version
+
+    # ---------------------------------
+    # LIFESPAN
+    # ---------------------------------
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        #Load the model once during the application startup
-        #injected loader can be real mlflow or a test model
+
         try:
             app.state.model = model_loader()
+            app.state.model_version = version_loader()
+
+            print(
+                f"Loaded iris-classifier version "
+                f"{app.state.model_version}"
+            )
+
         except Exception as ex:
-            raise RuntimeError(f"Failed to load champion model..\n {ex}")
-        client = mlflow.MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
-        champion=client.get_model_version_by_alias(name="iris-classifier", alias="champion")
-        app.state.model_version=champion.version
-        print(f"loaded iris-classifier version {app.state.model_version}")
-        yield   
+            raise RuntimeError(
+                f"Failed to load champion model: {ex}"
+            ) from ex
 
-    app=FastAPI(title="Iris Classification API",description="API for classifying iris flowers",version="3.0.0", lifespan=lifespan)
+        yield
 
-@app.get("/")
-def home():
-    return {"message": "API is ready to serve..."}
+    # ---------------------------------
+    # FASTAPI APPLICATION
+    # ---------------------------------
 
+    app = FastAPI(
+        title="Iris Classification API",
+        description="API for classifying iris flowers",
+        version="3.0.0",
+        lifespan=lifespan
+    )
 
-@app.get("/health")
-def health_check():
-    return {"status": "healthy"}
+    # ---------------------------------
+    # ROUTES
+    # ---------------------------------
 
+    @app.get("/")
+    def home():
+        return {
+            "message": "API is ready to serve..."
+        }
 
-@app.post("/predict")
-def predict(data: IrisRequest,request:Request):
-    model = request.app.state.model
-    features = [[
-        data.sepal_length,
-        data.sepal_width,
-        data.petal_length,
-        data.petal_width
-    ]]
+    @app.get("/health")
+    def health_check():
+        return {
+            "status": "healthy"
+        }
 
-    prediction = int(model.predict(features)[0])
+    @app.post("/predict")
+    def predict(data: IrisRequest, request: Request):
 
-    return {
-        "prediction": prediction,
-        "class_name": [
+        model = request.app.state.model
+
+        features = [[
+            data.sepal_length,
+            data.sepal_width,
+            data.petal_length,
+            data.petal_width
+        ]]
+
+        prediction = int(model.predict(features)[0])
+
+        class_names = [
             "setosa",
             "versicolor",
             "virginica"
-        ][prediction]
-    }
+        ]
+
+        if prediction not in range(len(class_names)):
+            raise HTTPException(
+                status_code=500,
+                detail="Model returned an invalid prediction"
+            )
+
+        return {
+            "prediction": prediction,
+            "class_name": class_names[prediction],
+            "model_version": request.app.state.model_version
+        }
+
+    return app
+
+
+# ---------------------------------
+# GLOBAL APPLICATION INSTANCE
+# ---------------------------------
+
+app = create_app()
