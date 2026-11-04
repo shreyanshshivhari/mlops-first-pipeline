@@ -3,14 +3,15 @@ import os
 import mlflow
 import mlflow.sklearn
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from typing import Callable
 
-# ---------------------------------
+
+# ---------------------------------------
 # MLFLOW CONFIGURATION
-# ---------------------------------
+# ---------------------------------------
 
 MLFLOW_TRACKING_URI = os.environ.get(
     "MLFLOW_TRACKING_URI",
@@ -22,17 +23,30 @@ mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 MODEL_URL = "models:/iris-classifier@champion"
 
 
-# ---------------------------------
+# ---------------------------------------
 # MODEL LOADER
-# ---------------------------------
+# ---------------------------------------
 
 def load_mlflow_model():
     return mlflow.sklearn.load_model(MODEL_URL)
 
 
-# ---------------------------------
+def load_model_version():
+    client = mlflow.MlflowClient(
+        tracking_uri=MLFLOW_TRACKING_URI
+    )
+
+    champion = client.get_model_version_by_alias(
+        name="iris-classifier",
+        alias="champion"
+    )
+
+    return champion.version
+
+
+# ---------------------------------------
 # REQUEST SCHEMA
-# ---------------------------------
+# ---------------------------------------
 
 class IrisRequest(BaseModel):
     sepal_length: float = Field(gt=0)
@@ -41,37 +55,27 @@ class IrisRequest(BaseModel):
     petal_width: float = Field(gt=0)
 
 
-# ---------------------------------
+# ---------------------------------------
 # APPLICATION FACTORY
-# ---------------------------------
+# ---------------------------------------
 
 def create_app(
     model_loader: Callable = load_mlflow_model,
-    version_loader: Callable = None
+    version_loader: Callable = load_model_version
 ):
 
-    if version_loader is None:
-        def version_loader():
-            client = mlflow.MlflowClient(
-                tracking_uri=MLFLOW_TRACKING_URI
-            )
-
-            champion = client.get_model_version_by_alias(
-                name="iris-classifier",
-                alias="champion"
-            )
-
-            return champion.version
-
-    # ---------------------------------
-    # LIFESPAN
-    # ---------------------------------
+    # ---------------------------------------
+    # APPLICATION LIFESPAN
+    # ---------------------------------------
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
 
         try:
+            # Load model once during startup
             app.state.model = model_loader()
+
+            # Fetch model version
             app.state.model_version = version_loader()
 
             print(
@@ -86,9 +90,9 @@ def create_app(
 
         yield
 
-    # ---------------------------------
+    # ---------------------------------------
     # FASTAPI APPLICATION
-    # ---------------------------------
+    # ---------------------------------------
 
     app = FastAPI(
         title="Iris Classification API",
@@ -97,9 +101,9 @@ def create_app(
         lifespan=lifespan
     )
 
-    # ---------------------------------
-    # ROUTES
-    # ---------------------------------
+    # ---------------------------------------
+    # HOME ENDPOINT
+    # ---------------------------------------
 
     @app.get("/")
     def home():
@@ -107,11 +111,21 @@ def create_app(
             "message": "API is ready to serve..."
         }
 
+    # ---------------------------------------
+    # HEALTH ENDPOINT
+    # ---------------------------------------
+
     @app.get("/health")
-    def health_check():
+    def health_check(request: Request):
+
         return {
-            "status": "healthy"
+            "status": "healthy",
+            "model_version": request.app.state.model_version
         }
+
+    # ---------------------------------------
+    # PREDICTION ENDPOINT
+    # ---------------------------------------
 
     @app.post("/predict")
     def predict(data: IrisRequest, request: Request):
@@ -148,8 +162,8 @@ def create_app(
     return app
 
 
-# ---------------------------------
+# ---------------------------------------
 # GLOBAL APPLICATION INSTANCE
-# ---------------------------------
+# ---------------------------------------
 
 app = create_app()
